@@ -37,3 +37,6 @@
 -callback delete_pdp_context(Context :: #context{},
 			     Args :: [term()]) ->
     Return :: term().
+
+-callback get_accounting(Context :: #context{}) ->
+    Return :: term().

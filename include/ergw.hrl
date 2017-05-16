@@ -73,3 +73,8 @@
 	  seq_no	:: gtp_socket:sequence_id(),
 	  new_peer	:: boolean()
 }).
+
+-record(counter, {
+	  rx :: {Bytes :: integer(), Packets :: integer()},
+	  tx :: {Bytes :: integer(), Packets :: integer()}
+	 }).

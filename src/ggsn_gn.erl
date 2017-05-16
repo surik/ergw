@@ -16,6 +16,9 @@
 	 handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2]).
 
+%% shared API's
+-export([init_session/3, init_session_from_gtp_req/3]).
+
 -include_lib("gtplib/include/gtp_packet.hrl").
 -include("include/ergw.hrl").
 -include("include/3gpp.hrl").

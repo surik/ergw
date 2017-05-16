@@ -20,6 +20,8 @@
 -include("include/ergw.hrl").
 -include("gtp_proxy_ds.hrl").
 
+-import(ergw_aaa_session, [to_session/1]).
+
 -compile([nowarn_unused_record]).
 
 -define(T3, 10 * 1000).
@@ -153,8 +155,17 @@ init(#{proxy_sockets := ProxyPorts, proxy_data_paths := ProxyDPs,
        ggsn := GGSN, proxy_data_source := ProxyDS,
        contexts := Contexts}, State) ->
 
+    SessionOpts = [{'Accouting-Update-Fun', fun accounting_update/2}],
+    {ok, Session} = ergw_aaa_session_sup:new_session(self(), to_session(SessionOpts)),
+
     {ok, State#{proxy_ports => ProxyPorts, proxy_dps => ProxyDPs,
-		contexts => Contexts, default_gw => GGSN, proxy_ds => ProxyDS}}.
+		'Session' => Session, contexts => Contexts,
+		default_gw => GGSN, proxy_ds => ProxyDS}}.
+
+handle_call(get_accounting, _From,
+	    #{context := Context} = State) ->
+    Counter = gtp_dp:get_accounting(Context),
+    {reply, Counter, State};
 
 handle_call(delete_context, _From, State) ->
     lager:warning("delete_context no handled(yet)"),
@@ -241,7 +252,8 @@ handle_request(_ReqKey, _Request, true, State) ->
 handle_request(ReqKey,
 	       #gtp{type = create_pdp_context_request,
 		    ie = IEs} = Request, _Resent,
-	       #{context := Context0} = State) ->
+	       #{context := Context0, aaa_opts := AAAopts,
+		 'Session' := Session} = State) ->
 
     Context1 = update_context_from_gtp_req(Request, Context0#context{state = #context_state{}}),
     ContextPreProxy = gtp_path:bind(Request, Context1),
@@ -249,17 +261,17 @@ handle_request(ReqKey,
     gtp_context:terminate_colliding_context(ContextPreProxy),
     gtp_context:remote_context_register_new(ContextPreProxy),
 
-    Session1 = init_session(IEs, ContextPreProxy),
-    lager:debug("Invoking CONTROL: ~p", [Session1]),
-    %% ergw_control:authenticate(Session1),
-
-	ProxyInfo = handle_proxy_info(Request, ContextPreProxy, State),
+    ProxyInfo = handle_proxy_info(Request, ContextPreProxy, State),
     #proxy_ggsn{restrictions = Restrictions} = ProxyGGSN = gtp_proxy_ds:lb(ProxyInfo),
 
     Context = ContextPreProxy#context{restrictions = Restrictions},
     gtp_context:enforce_restrictions(Request, Context),
 
     {ProxyGtpPort, ProxyGtpDP} = get_proxy_sockets(ProxyGGSN, State),
+
+    SessionOpts0 = ggsn_gn:init_session(IEs, Context, AAAopts),
+    SessionOpts = ggsn_gn:init_session_from_gtp_req(IEs, AAAopts, SessionOpts0),
+    ergw_aaa_session:start(Session, SessionOpts),
 
     ProxyContext0 = init_proxy_context(ProxyGtpPort, ProxyGtpDP, Context, ProxyInfo, ProxyGGSN),
     ProxyContext = gtp_path:bind(ProxyContext0),
@@ -458,6 +470,20 @@ handle_proxy_info(#gtp{ie = #{?'Recovery' := Recovery}},
 			   context = Context})
     end.
 
+accounting_update(GTP, SessionOpts) ->
+    case gen_server:call(GTP, get_accounting) of
+	{ok, #counter{rx = {RcvdBytes, RcvdPkts},
+		      tx = {SendBytes, SendPkts}}} ->
+	    Acc = [{'InPackets',  RcvdPkts},
+		   {'OutPackets', SendPkts},
+		   {'InOctets',   RcvdBytes},
+		   {'OutOctets',  SendBytes}],
+	    ergw_aaa_session:merge(SessionOpts, to_session(Acc));
+	_Other ->
+	    lager:warning("got unexpected accounting: ~p", [_Other]),
+	    SessionOpts
+    end.
+
 update_path_bind(NewContext0, OldContext)
   when NewContext0 /= OldContext ->
     NewContext = gtp_path:bind(NewContext0),
@@ -465,32 +491,6 @@ update_path_bind(NewContext0, OldContext)
     NewContext;
 update_path_bind(NewContext, _OldContext) ->
     NewContext.
-
-init_session(IEs, #context{control_port = #gtp_port{ip = LocalIP}}) ->
-    Session = #{'Service-Type'      => 'Framed-User',
-		'Framed-Protocol'   => 'GPRS-PDP-Context',
-		'3GPP-GGSN-Address' => LocalIP
-	       },
-    maps:fold(fun copy_to_session/3, Session, IEs).
-
-%% copy_to_session(#international_mobile_subscriber_identity{imsi = IMSI}, Session) ->
-%%     Id = [{'Subscription-Id-Type' , 1}, {'Subscription-Id-Data', IMSI}],
-%%     Session#{'Subscription-Id' => Id};
-
-copy_to_session(_K, #international_mobile_subscriber_identity{imsi = IMSI}, Session) ->
-    Session#{'IMSI' => IMSI};
-copy_to_session(_K, #ms_international_pstn_isdn_number{
-		       msisdn = {isdn_address, _, _, 1, MSISDN}}, Session) ->
-    Session#{'MSISDN' => MSISDN};
-copy_to_session(_K, #gsn_address{instance = 0, address = IP}, Session) ->
-    Session#{'SGSN-Address' => gtp_c_lib:ip2bin(IP)};
-copy_to_session(_K, #rat_type{rat_type = Type}, Session) ->
-    Session#{'RAT-Type' => Type};
-copy_to_session(_K, #selection_mode{mode = Mode}, Session) ->
-    Session#{'Selection-Mode' => Mode};
-
-copy_to_session(_K, _V, Session) ->
-    Session.
 
 init_proxy_context(CntlPort, DataPort,
 		   #context{imei = IMEI, context_id = ContextId, version = Version,
