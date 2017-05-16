@@ -20,6 +20,8 @@
 -include("include/ergw.hrl").
 -include("gtp_proxy_ds.hrl").
 
+-import(ergw_aaa_session, [to_session/1]).
+
 -compile([nowarn_unused_record]).
 
 -define(T3, 10 * 1000).
@@ -152,8 +154,17 @@ init(#{proxy_sockets := ProxyPorts, proxy_data_paths := ProxyDPs,
        ggsn := GGSN, proxy_data_source := ProxyDS,
        contexts := Contexts}, State) ->
 
+    SessionOpts = [{'Accouting-Update-Fun', fun accounting_update/2}],
+    {ok, Session} = ergw_aaa_session_sup:new_session(self(), to_session(SessionOpts)),
+
     {ok, State#{proxy_ports => ProxyPorts, proxy_dps => ProxyDPs,
-		contexts => Contexts, default_gw => GGSN, proxy_ds => ProxyDS}}.
+		'Session' => Session, contexts => Contexts,
+		default_gw => GGSN, proxy_ds => ProxyDS}}.
+
+handle_call(get_accounting, _From,
+	    #{context := Context} = State) ->
+    Counter = gtp_dp:get_accounting(Context),
+    {reply, Counter, State};
 
 handle_call(delete_context, _From, State) ->
     lager:warning("delete_context no handled(yet)"),
@@ -232,7 +243,8 @@ handle_request(_ReqKey, _Request, true, State) ->
 handle_request(ReqKey,
 	       #gtp{type = create_pdp_context_request,
 		    ie = IEs} = Request, _Resent,
-	       #{context := Context0} = State) ->
+	       #{context := Context0, aaa_opts := AAAopts,
+		 'Session' := Session} = State) ->
 
     Context1 = update_context_from_gtp_req(Request, Context0#context{state = #context_state{}}),
     ContextPreProxy = gtp_path:bind(Request, Context1),
@@ -251,6 +263,10 @@ handle_request(ReqKey,
     gtp_context:enforce_restrictions(Request, Context),
 
     {ProxyGtpPort, ProxyGtpDP} = get_proxy_sockets(ProxyGGSN, State),
+
+    SessionOpts0 = ggsn_gn:init_session(IEs, Context, AAAopts),
+    SessionOpts = ggsn_gn:init_session_from_gtp_req(IEs, AAAopts, SessionOpts0),
+    ergw_aaa_session:start(Session, SessionOpts),
 
     ProxyContext0 = init_proxy_context(ProxyGtpPort, ProxyGtpDP, Context, ProxyInfo, ProxyGGSN),
     ProxyContext = gtp_path:bind(ProxyContext0),
@@ -437,6 +453,20 @@ handle_proxy_info(#gtp{ie = #{?'Recovery' := Recovery}},
 				    Context#context.remote_control_tei,
 				    ResponseIEs},
 			   context = Context})
+    end.
+
+accounting_update(GTP, SessionOpts) ->
+    case gen_server:call(GTP, get_accounting) of
+	{ok, #counter{rx = {RcvdBytes, RcvdPkts},
+		      tx = {SendBytes, SendPkts}}} ->
+	    Acc = [{'InPackets',  RcvdPkts},
+		   {'OutPackets', SendPkts},
+		   {'InOctets',   RcvdBytes},
+		   {'OutOctets',  SendBytes}],
+	    ergw_aaa_session:merge(SessionOpts, to_session(Acc));
+	_Other ->
+	    lager:warning("got unexpected accounting: ~p", [_Other]),
+	    SessionOpts
     end.
 
 update_path_bind(NewContext0, OldContext)

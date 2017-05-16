@@ -15,7 +15,8 @@
 	 start_link/1, send/4, get_id/1,
 	 create_pdp_context/2,
 	 update_pdp_context/2,
-	 delete_pdp_context/2]).
+	 delete_pdp_context/2,
+	 get_accounting/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -59,6 +60,11 @@ delete_pdp_context(#context{remote_data_ip = PeerIP,
 			    local_data_tei = LocalTEI,
 			    remote_data_tei = RemoteTEI} = Context, Args) ->
     dp_call(Context, {delete_pdp_context, PeerIP, LocalTEI, RemoteTEI, Args}).
+
+get_accounting(#context{remote_data_ip = PeerIP,
+			local_data_tei = LocalTEI,
+			remote_data_tei = RemoteTEI} = Context) ->
+    dp_call(Context, {get_accounting, PeerIP, LocalTEI, RemoteTEI}).
 
 %%%===================================================================
 %%% Options Validation
