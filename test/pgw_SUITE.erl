@@ -140,7 +140,8 @@ all() ->
      interop_sgsn_to_sgw,
      interop_sgsn_to_sgw_const_tei,
      interop_sgw_to_sgsn,
-     create_session_overload].
+     create_session_overload,
+     session_accounting].
 
 %%%===================================================================
 %%% Tests
@@ -913,6 +914,45 @@ create_session_overload(Config) ->
 
     create_session(overload, S),
 
+    meck_validate(Config),
+    ok.
+
+%%--------------------------------------------------------------------
+session_accounting() ->
+    [{doc, "Check that accounting in session works"}].
+session_accounting(Config) ->
+    S = make_gtp_socket(Config),
+
+    {GtpC, _, _} = create_session(S),
+
+    [#{'Session' := Session, 'Process' := Context}|_] = ergw_api:tunnel(all),
+    SessionOpts0 = ergw_aaa_session:get(Session),
+    #{'Accouting-Update-Fun' := UpdateFun} = SessionOpts0,
+
+    %% the default meck accounting handler returns nothing, make sure we handle that
+    SessionOpts1 = UpdateFun(Context, SessionOpts0),
+    ?equal(false, maps:is_key('InPackets', SessionOpts1)),
+    ?equal(false, maps:is_key('InOctets', SessionOpts1)),
+
+    %% install a sensible accouting meck and try again....
+    ok = meck:expect(gtp_dp, get_accounting,
+		     fun(_Context) ->
+			     {ok, #counter{rx = {1, 2},
+					   tx = {3, 4}}}
+		     end),
+    SessionOpts2 = UpdateFun(Context, SessionOpts1),
+    ?match(#{'InPackets' := 2, 'OutPackets' := 4,
+	     'InOctets' := 1, 'OutOctets' := 3}, SessionOpts2),
+
+    SessionOpts3 = UpdateFun(Context, SessionOpts2),
+    ?match(#{'InPackets' := 2, 'OutPackets' := 4,
+	     'InOctets' := 1, 'OutOctets' := 3}, SessionOpts3),
+
+    ok = meck:expect(gtp_dp, get_accounting, fun(_Context) -> ok end),
+
+    delete_session(S, GtpC),
+
+    ok = meck:wait(?HUT, terminate, '_', ?TIMEOUT),
     meck_validate(Config),
     ok.
 

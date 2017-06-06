@@ -23,6 +23,8 @@
 -include("include/ergw.hrl").
 -include("include/3gpp.hrl").
 
+-import(ergw_aaa_session, [to_session/1]).
+
 -define(T3, 10 * 1000).
 -define(N3, 5).
 
@@ -78,8 +80,13 @@ validate_option(Opt, Value) ->
     gtp_context:validate_option(Opt, Value).
 
 init(_Opts, State) ->
-    {ok, Session} = ergw_aaa_session_sup:new_session(self(), #{}),
+    SessionOpts = [{'Accouting-Update-Fun', fun accounting_update/2}],
+    {ok, Session} = ergw_aaa_session_sup:new_session(self(), to_session(SessionOpts)),
     {ok, State#{'Session' => Session}}.
+
+handle_call(get_accounting, _From, #{context := Context} = State) ->
+    Counter = gtp_dp:get_accounting(Context),
+    {reply, Counter, State};
 
 handle_call(delete_context, From, #{context := Context} = State) ->
     delete_context(From, Context),
@@ -250,6 +257,20 @@ authenticate(Context, Session, SessionOpts, Request) ->
 	    throw(#ctx_err{level = ?FATAL,
 			   reply = Reply1,
 			   context = Context})
+    end.
+
+accounting_update(GTP, SessionOpts) ->
+    case gen_server:call(GTP, get_accounting) of
+	{ok, #counter{rx = {RcvdBytes, RcvdPkts},
+		      tx = {SendBytes, SendPkts}}} ->
+	    Acc = [{'InPackets',  RcvdPkts},
+		   {'OutPackets', SendPkts},
+		   {'InOctets',   RcvdBytes},
+		   {'OutOctets',  SendBytes}],
+	    ergw_aaa_session:merge(SessionOpts, to_session(Acc));
+	_Other ->
+	    lager:warning("got unexpected accounting: ~p", [_Other]),
+	    SessionOpts
     end.
 
 pdp_alloc(#end_user_address{pdp_type_organization = 1,
