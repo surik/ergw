@@ -94,30 +94,26 @@ init(_Opts, State) ->
     {ok, State#{'Session' => Session}}.
 
 handle_call(get_accounting, _From, #{context := Context} = State) ->
-    Counter = gtp_dp:get_accounting(Context),
+    Counter = get_accounting(Context),
     {reply, Counter, State};
 
 handle_call(delete_context, From, #{context := Context} = State) ->
     delete_context(From, Context),
     {noreply, State};
 
-handle_call(terminate_context, _From, #{context := Context} = State) ->
-    dp_delete_pdp_context(Context),
-    pdn_release_ip(Context),
+handle_call(terminate_context, _From, State) ->
+    close_pdn_context(State),
     {stop, normal, ok, State};
 
 handle_call({path_restart, Path}, _From,
-	    #{context := #context{path = Path} = Context} = State) ->
-    dp_delete_pdp_context(Context),
-    pdn_release_ip(Context),
+	    #{context := #context{path = Path}} = State) ->
+    close_pdn_context(State),
     {stop, normal, ok, State};
 handle_call({path_restart, _Path}, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({packet_in, _GtpPort, _IP, _Port, #gtp{type = error_indication}},
-	    #{context := Context} = State) ->
-    dp_delete_pdp_context(Context),
-    pdn_release_ip(Context),
+handle_cast({packet_in, _GtpPort, _IP, _Port, #gtp{type = error_indication}}, State) ->
+    close_pdn_context(State),
     {stop, normal, State};
 
 handle_cast({packet_in, _GtpPort, _IP, _Port, _Msg}, State) ->
@@ -323,8 +319,7 @@ handle_request(_ReqKey,
 
     case Result of
 	{ok, {ReplyIEs, State}} ->
-	    dp_delete_pdp_context(Context),
-	    pdn_release_ip(Context),
+	    close_pdn_context(State),
 	    Reply = response(delete_session_response, Context, ReplyIEs),
 	    {stop, Reply, State};
 
@@ -365,10 +360,8 @@ handle_response(_, timeout, #gtp{type = update_bearer_request},
     delete_context(undefined, Context),
     {noreply, State};
 
-handle_response(From, timeout, #gtp{type = delete_bearer_request},
-		#{context := Context} = State) ->
-    dp_delete_pdp_context(Context),
-    pdn_release_ip(Context),
+handle_response(From, timeout, #gtp{type = delete_bearer_request}, State) ->
+    close_pdn_context(State),
     if is_tuple(From) -> gen_server:reply(From, {error, timeout});
        true -> ok
     end,
@@ -380,8 +373,7 @@ handle_response(From,
 		_Request,
 		#{context := Context0} = State) ->
     Context = gtp_path:bind(Response, Context0),
-    dp_delete_pdp_context(Context),
-    pdn_release_ip(Context),
+    close_pdn_context(State),
     if is_tuple(From) -> gen_server:reply(From, {ok, Cause});
        true -> ok
     end,
@@ -421,19 +413,24 @@ authenticate(Context, Session, SessionOpts, Request) ->
 			   context = Context})
     end.
 
-accounting_update(GTP, SessionOpts) ->
-    case gen_server:call(GTP, get_accounting) of
+get_accounting(Context) ->
+    case gtp_dp:get_accounting(Context) of
 	{ok, #counter{rx = {RcvdBytes, RcvdPkts},
 		      tx = {SendBytes, SendPkts}}} ->
 	    Acc = [{'InPackets',  RcvdPkts},
 		   {'OutPackets', SendPkts},
 		   {'InOctets',   RcvdBytes},
 		   {'OutOctets',  SendBytes}],
-	    ergw_aaa_session:merge(SessionOpts, to_session(Acc));
+	    to_session(Acc);
 	_Other ->
 	    lager:warning("got unexpected accounting: ~p", [_Other]),
-	    SessionOpts
+	    to_session([])
     end.
+
+accounting_update(GTP, SessionOpts) ->
+    lager:debug("accounting_update(~p, ~p)", [GTP, SessionOpts]),
+    Counter = gen_server:call(GTP, get_accounting),
+    ergw_aaa_session:merge(SessionOpts, Counter).
 
 match_context(_Type, _Context, undefined) ->
     error_m:return(ok);
@@ -481,6 +478,14 @@ encode_paa(Type, IPv4, IPv6) ->
 
 pdn_release_ip(#context{vrf = VRF, ms_v4 = MSv4, ms_v6 = MSv6}) ->
     vrf:release_pdp_ip(VRF, MSv4, MSv6).
+
+close_pdn_context(#{context := Context, 'Session' := Session}) ->
+    SessionOpts = get_accounting(Context),
+    lager:debug("Accounting Opts: ~p", [SessionOpts]),
+    ergw_aaa_session:stop(Session, SessionOpts),
+
+    dp_delete_pdp_context(Context),
+    pdn_release_ip(Context).
 
 apply_context_change(NewContext0, OldContext, State) ->
     NewContextPending = gtp_path:bind(NewContext0),
