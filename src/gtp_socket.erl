@@ -45,6 +45,10 @@
 	  requests,
 	  responses,
 
+	  redirector_socket  = nil   :: nil | gen_socket:socket(),
+	  redirector_nodes   = []    :: list(),
+	  redirector_lb_type = round_robin :: random | round_robin,
+
 	  restart_counter}).
 
 -record(send_req, {
@@ -162,8 +166,23 @@ validate_option(reuseaddr, Value) when is_boolean(Value) ->
 validate_option(rcvbuf, Value)
   when is_integer(Value) andalso Value > 0 ->
     Value;
+validate_option(redirector, Value) when is_list(Value) ->
+    lists:map(fun validate_redirector_option/1, Value),
+    Value;
 validate_option(Opt, Value) ->
     throw({error, {options, {Opt, Value}}}).
+
+validate_redirector_option({redirector_nodes, Nodes}) when is_list(Nodes) ->
+    lists:map(fun({Family, IP, Port}) when (Family == inet4 orelse Family == inet6),
+                                           is_tuple(IP), is_integer(Port), Port > 0 -> ok;
+                 (Value) -> throw({error, {redirector_options, Value}})
+              end, Nodes),
+    ok;
+validate_redirector_option({redirector_lb_type, Type}) 
+  when Type == round_robin; Type == random ->
+    ok;
+validate_redirector_option(Value) ->
+    throw({error, {redirector_options, Value}}).
 
 %%%===================================================================
 %%% call/cast wrapper for gtp_port
@@ -196,7 +215,7 @@ init([Name, #{ip := IP} = SocketOpts]) ->
     init_exometer(GtpPort),
     gtp_socket_reg:register(Name, GtpPort),
 
-    State = #state{
+    State0 = #state{
 	       gtp_port = GtpPort,
 	       ip = IP,
 	       socket = S,
@@ -208,7 +227,18 @@ init([Name, #{ip := IP} = SocketOpts]) ->
 	       responses = ergw_cache:new(?CACHE_TIMEOUT, responses),
 
 	       restart_counter = RCnt},
+    State = maybe_init_redirector(State0, SocketOpts),
     {ok, State}.
+
+maybe_init_redirector(#state{ip = IP} = State, #{redirector := [_|_] = Redirector}) -> 
+    NormalizeFamily = fun(inet) -> inet4; (inet6) -> inet6; (Family) -> Family end,
+    {ok, Socket} = gen_socket:socket(family(IP), raw, udp),
+    ok = gen_socket:setsockopt(Socket, sol_ip, hdrincl, true),
+    ok = gen_socket:bind(Socket, {NormalizeFamily(family(IP)), IP, 0}),
+    State#state{redirector_socket = Socket, 
+                redirector_nodes = proplists:get_value(redirector_nodes, Redirector, []),
+                redirector_lb_type = proplists:get_value(redirector_lb_type, Redirector, round_robin)};
+maybe_init_redirector(State, _) -> State.
 
 handle_call(get_restart_counter, _From, #state{restart_counter = RCnt} = State) ->
     {reply, RCnt, State};
@@ -482,7 +512,7 @@ handle_message(ArrivalTS, IP, Port, Data, #state{gtp_port = GtpPort} = State0) -
 						lager:pr(State0#state.gtp_port, ?MODULE),
 						lager:pr(Msg, ?MODULE)}]),
 	    message_counter(rx, GtpPort, IP, Msg),
-	    State = handle_message_1(ArrivalTS, IP, Port, Msg, State0),
+	    State = handle_message_1(ArrivalTS, IP, Port, Msg, Data, State0),
 	    {noreply, State}
     catch
 	Class:Error ->
@@ -490,12 +520,50 @@ handle_message(ArrivalTS, IP, Port, Data, #state{gtp_port = GtpPort} = State0) -
 	    {noreply, State0}
     end.
 
-handle_message_1(ArrivalTS, IP, Port, #gtp{type = echo_request} = Msg, State) ->
+optlen(HL) -> (HL - 5) * 4.
+create_ipv4_udp_packet({SA1, SA2, SA3, SA4}, SPort, {DA1, DA2, DA3, DA4}, DPort, Payload) ->
+    % UDP
+    ULen = 8 + byte_size(Payload),
+    USum = 0,
+    UDP = <<SPort:16, DPort:16, ULen:16, USum:16, Payload/binary>>,
+    % IPv4
+    HL = 5, DSCP = 0, ECN = 0, Len = 160 + optlen(HL) + byte_size(UDP),
+    Id = 0, DF = 0, MF = 0, Off = 0,
+    TTL = 64, Protocol = 17, Sum = 0,
+    Opt = <<>>,
+    % Packet
+    <<4:4, HL:4, DSCP:6, ECN:2, Len:16, 
+      Id:16, 0:1, DF:1, MF:1, Off:13, 
+      TTL:8, Protocol:8, Sum:16,
+      SA1:8, SA2:8, SA3:8, SA4:8, 
+      DA1:8, DA2:8, DA3:8, DA4:8, 
+      Opt:(optlen(HL))/binary, UDP/binary>>.
+
+apply_redirector_lb_type([Node | Nodes], round_robin) ->
+    {Node, Nodes ++ [Node]}; 
+apply_redirector_lb_type(Nodes, random) ->
+    Index = rand:uniform(length(Nodes)),
+    {lists:nth(Index, Nodes), Nodes}.
+
+handle_message_1(_ArrivalTS, IP, Port, _Msg, Packet0, 
+                 #state{redirector_socket = Socket,
+                        redirector_nodes = [_|_] = Nodes,
+                        redirector_lb_type = LBType} = State)
+  when Socket /= nil ->
+    {{Family, DIP, DPort} = Node, NewNodes} = apply_redirector_lb_type(Nodes, LBType),
+    Packet = case Family of
+                 inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
+                 inet6 -> throw("inet6 is not supported now")
+             end,
+    gen_socket:sendto(Socket, Node, Packet),
+    State#state{redirector_nodes = NewNodes};
+
+handle_message_1(ArrivalTS, IP, Port, #gtp{type = echo_request} = Msg, _Data, State) ->
     ReqKey = make_request(ArrivalTS, IP, Port, Msg, State),
     gtp_path:handle_request(ReqKey, Msg),
     State;
 
-handle_message_1(ArrivalTS, IP, Port, #gtp{version = Version, type = MsgType} = Msg, State) ->
+handle_message_1(ArrivalTS, IP, Port, #gtp{version = Version, type = MsgType} = Msg, _Data, State) ->
     Handler =
 	case Version of
 	    v1 -> gtp_v1_c;

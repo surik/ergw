@@ -1,5 +1,5 @@
-sudo: false
-
+dist: trusty
+sudo: required
 language: erlang
 
 otp_release:
@@ -17,7 +17,7 @@ before_install:
 script:
   - source test/env.sh
   - ./rebar3 compile
-  - ./rebar3 do xref, ct, coveralls send
+  - sudo env PATH=$PATH ./rebar3 do xref, ct, coveralls send
 
 notifications:
   slack:
