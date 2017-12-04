@@ -44,6 +44,7 @@ inject_redirector(Config) ->
                  {ip,  ?TEST_GSN},
                  {reuseaddr, true},
                  {redirector, [
+                               {redirector_ka_timeout, 500},
                                {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT}]}
                               ]} ]},
     ModifySockets = 
@@ -63,7 +64,8 @@ all() ->
     [
      invalid_gtp_pdu,
      invalid_gtp_msg,
-     simple_pdp_context_request
+     simple_pdp_context_request,
+     keep_alive
     ].
 
 %%%===================================================================
@@ -98,6 +100,20 @@ simple_pdp_context_request() ->
            "through GTP Redirector"}].
 simple_pdp_context_request(Config) ->
     ggsn_SUITE:simple_pdp_context_request(Config).
+
+%%--------------------------------------------------------------------
+keep_alive() ->
+    [{doc, "All backendd GTP-C should answer on echo_request which sent by timeout"}].
+keep_alive(_Config) ->
+    Id = [path, irx, {127,0,0,1}, tx, v1, echo_response],
+    Cnt0 = get_value(exometer:get_value(Id)),
+    timer:sleep(1000),
+    Cnt = get_value(exometer:get_value(Id)),
+    ?match(true, Cnt > Cnt0),
+    ok.
+
+get_value({ok, DPs}) -> proplists:get_value(value, DPs, -1);
+get_value(_) -> -1.
 
 %%%===================================================================
 %%% Internal functions

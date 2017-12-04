@@ -45,9 +45,11 @@
 	  requests,
 	  responses,
 
-	  redirector_socket  = nil   :: nil | gen_socket:socket(),
-	  redirector_nodes   = []    :: list(),
-	  redirector_lb_type = round_robin :: random | round_robin,
+	  redirector_socket     = nil   :: nil | gen_socket:socket(),
+	  redirector_nodes      = []    :: list(),
+	  redirector_lb_type    = round_robin :: random | round_robin,
+	  redirector_ka_timeout = 60000 :: non_neg_integer(), % keep-alive timeout
+	  redirector_ka_timer   = nil   :: reference(),
 
 	  restart_counter}).
 
@@ -181,6 +183,9 @@ validate_redirector_option({redirector_nodes, Nodes}) when is_list(Nodes) ->
 validate_redirector_option({redirector_lb_type, Type}) 
   when Type == round_robin; Type == random ->
     ok;
+validate_redirector_option({redirector_ka_timeout, Timeout})
+  when is_integer(Timeout), Timeout > 0 ->
+    ok;
 validate_redirector_option(Value) ->
     throw({error, {redirector_options, Value}}).
 
@@ -235,9 +240,13 @@ maybe_init_redirector(#state{ip = IP} = State, #{redirector := [_|_] = Redirecto
     {ok, Socket} = gen_socket:socket(family(IP), raw, udp),
     ok = gen_socket:setsockopt(Socket, sol_ip, hdrincl, true),
     ok = gen_socket:bind(Socket, {NormalizeFamily(family(IP)), IP, 0}),
+    KATimeout = proplists:get_value(redirector_ka_timeout, Redirector, 60000),
+    TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
     State#state{redirector_socket = Socket, 
                 redirector_nodes = proplists:get_value(redirector_nodes, Redirector, []),
-                redirector_lb_type = proplists:get_value(redirector_lb_type, Redirector, round_robin)};
+                redirector_lb_type = proplists:get_value(redirector_lb_type, Redirector, round_robin),
+                redirector_ka_timeout = KATimeout,
+                redirector_ka_timer = TRef};
 maybe_init_redirector(State, _) -> State.
 
 handle_call(get_restart_counter, _From, #state{restart_counter = RCnt} = State) ->
@@ -313,6 +322,17 @@ handle_info(Info = {timeout, _TRef, {request, SeqId}}, #state{gtp_port = GtpPort
 	none ->
 	    {noreply, State1}
     end;
+
+handle_info({timeout, _TRef, redirector_keep_alive}, 
+            #state{gtp_port = GtpPort,
+                   redirector_ka_timeout = KATimeout,
+                   redirector_nodes = Nodes} = State) ->
+    lists:foreach(fun({_, IP, Port}) ->
+                      Msg = gtp_v1_c:build_echo_request(GtpPort),
+                      send_request(GtpPort, IP, Port, ?T3 * 2, 0, Msg, [])
+                  end, Nodes),
+    TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
+    {noreply, State#state{redirector_ka_timer = TRef}};
 
 handle_info({timeout, _TRef, requests}, #state{requests = Requests} = State) ->
     {noreply, State#state{requests = ergw_cache:expire(Requests)}};
@@ -545,12 +565,12 @@ apply_redirector_lb_type(Nodes, random) ->
     Index = rand:uniform(length(Nodes)),
     {lists:nth(Index, Nodes), Nodes}.
 
-handle_message_1(_ArrivalTS, IP, Port, Msg, Packet0, 
+handle_message_1(_ArrivalTS, IP, Port, #gtp{type = Type} = Msg, Packet0, 
                  #state{gtp_port = GtpPort,
                         redirector_socket = Socket,
                         redirector_nodes = [_|_] = Nodes,
                         redirector_lb_type = LBType} = State)
-  when Socket /= nil ->
+  when Socket /= nil andalso (Type /= echo_response orelse Type /= echo_request) ->
     {{Family, DIP, DPort} = Node, NewNodes} = apply_redirector_lb_type(Nodes, LBType),
     Packet = case Family of
                  inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
