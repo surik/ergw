@@ -545,8 +545,9 @@ apply_redirector_lb_type(Nodes, random) ->
     Index = rand:uniform(length(Nodes)),
     {lists:nth(Index, Nodes), Nodes}.
 
-handle_message_1(_ArrivalTS, IP, Port, _Msg, Packet0, 
-                 #state{redirector_socket = Socket,
+handle_message_1(_ArrivalTS, IP, Port, Msg, Packet0, 
+                 #state{gtp_port = GtpPort,
+                        redirector_socket = Socket,
                         redirector_nodes = [_|_] = Nodes,
                         redirector_lb_type = LBType} = State)
   when Socket /= nil ->
@@ -556,6 +557,7 @@ handle_message_1(_ArrivalTS, IP, Port, _Msg, Packet0,
                  inet6 -> throw("inet6 is not supported now")
              end,
     gen_socket:sendto(Socket, Node, Packet),
+	message_counter(rr, GtpPort, IP, Msg),
     State#state{redirector_nodes = NewNodes};
 
 handle_message_1(ArrivalTS, IP, Port, #gtp{type = echo_request} = Msg, _Data, State) ->
