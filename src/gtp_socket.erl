@@ -175,9 +175,11 @@ validate_option(Opt, Value) ->
     throw({error, {options, {Opt, Value}}}).
 
 validate_redirector_option({redirector_nodes, Nodes}) when is_list(Nodes) ->
-    lists:map(fun({Family, IP, Port}) when (Family == inet4 orelse Family == inet6),
-                                           is_tuple(IP), is_integer(Port), Port > 0 -> ok;
-                 (Value) -> throw({error, {redirector_options, Value}})
+    lists:map(fun({Family, IP, Port, Version} = Value) when 
+                      (Family == inet4 orelse Family == inet6),
+                      is_tuple(IP), is_integer(Port), Port > 0,
+                      (Version == v1 orelse Version == v2) -> Value;
+                 (Value) -> throw({error, {redirector_nodes, Value}})
               end, Nodes),
     ok;
 validate_redirector_option({redirector_lb_type, Type}) 
@@ -327,8 +329,11 @@ handle_info({timeout, _TRef, redirector_keep_alive},
             #state{gtp_port = GtpPort,
                    redirector_ka_timeout = KATimeout,
                    redirector_nodes = Nodes} = State) ->
-    lists:foreach(fun({_, IP, Port}) ->
-                      Msg = gtp_v1_c:build_echo_request(GtpPort),
+    lists:foreach(fun({_, IP, Port, Version}) ->
+                      Msg = case Version of
+                                v1 -> gtp_v1_c:build_echo_request(GtpPort);
+                                v2 -> gtp_v2_c:build_echo_request(GtpPort)
+                            end,
                       send_request(GtpPort, IP, Port, ?T3 * 2, 0, Msg, [])
                   end, Nodes),
     TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
@@ -570,13 +575,13 @@ handle_message_1(_ArrivalTS, IP, Port, #gtp{type = Type} = Msg, Packet0,
                         redirector_socket = Socket,
                         redirector_nodes = [_|_] = Nodes,
                         redirector_lb_type = LBType} = State)
-  when Socket /= nil andalso (Type /= echo_response orelse Type /= echo_request) ->
-    {{Family, DIP, DPort} = Node, NewNodes} = apply_redirector_lb_type(Nodes, LBType),
+  when Socket /= nil, Type /= echo_response, Type /= echo_request ->
+    {{Family, DIP, DPort, _}, NewNodes} = apply_redirector_lb_type(Nodes, LBType),
     Packet = case Family of
                  inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
                  inet6 -> throw("inet6 is not supported now")
              end,
-    gen_socket:sendto(Socket, Node, Packet),
+    gen_socket:sendto(Socket, {Family, DIP, DPort}, Packet),
 	message_counter(rr, GtpPort, IP, Msg),
     State#state{redirector_nodes = NewNodes};
 

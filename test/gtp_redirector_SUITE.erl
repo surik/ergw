@@ -45,7 +45,7 @@ inject_redirector(Config) ->
                  {reuseaddr, true},
                  {redirector, [
                                {redirector_ka_timeout, 500},
-                               {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT}]}
+                               {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT, v1}]}
                               ]} ]},
     ModifySockets = 
         fun({sockets, Sockets}) -> {sockets, lists:map(ModifyIRX, [RRX | Sockets])};
