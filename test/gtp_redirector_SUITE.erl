@@ -29,7 +29,11 @@ init_per_suite(Config0) ->
     Config = [{handler_under_test, ?HUT},
               {app_cfg, AppCfg}
               | Config0],
-    lib_init_per_suite(Config).
+    Config1 = lib_init_per_suite(Config),
+    % we need this timeout (2 times of Keep-Alive timeout) to be sure 
+    % that nodes which are not available will be removed
+    timer:sleep(1100),
+    Config1.
 
 inject_redirector(Config) ->
     ModifyIRX = 
@@ -45,7 +49,11 @@ inject_redirector(Config) ->
                  {reuseaddr, true},
                  {redirector, [
                                {redirector_ka_timeout, 500},
-                               {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT, v1}]}
+                               {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT, v1},
+                                                   % this one should be not available 
+                                                   % and be ignored by keep-alive mechanism
+                                                   {inet4, {10,0,0,1}, ?GTP1c_PORT, v1} 
+                                                  ]}
                               ]} ]},
     ModifySockets = 
         fun({sockets, Sockets}) -> {sockets, lists:map(ModifyIRX, [RRX | Sockets])};
