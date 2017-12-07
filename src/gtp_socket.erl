@@ -240,10 +240,9 @@ init([Name, #{ip := IP} = SocketOpts]) ->
     {ok, State}.
 
 maybe_init_redirector(#state{ip = IP} = State, #{redirector := [_|_] = Redirector}) -> 
-    NormalizeFamily = fun(inet) -> inet4; (inet6) -> inet6; (Family) -> Family end,
     {ok, Socket} = gen_socket:socket(family(IP), raw, udp),
     ok = gen_socket:setsockopt(Socket, sol_ip, hdrincl, true),
-    ok = gen_socket:bind(Socket, {NormalizeFamily(family(IP)), IP, 0}),
+    ok = gen_socket:bind(Socket, {family_v(IP), IP, 0}),
     KATimeout = proplists:get_value(redirector_ka_timeout, Redirector, 60000),
     Nodes = proplists:get_value(redirector_nodes, Redirector, []),
     TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
@@ -449,6 +448,10 @@ make_request(ArrivalTS, IP, Port,
 
 family({_,_,_,_}) -> inet;
 family({_,_,_,_,_,_,_,_}) -> inet6.
+
+% this returs family with the version number in the end
+family_v({_,_,_,_}) -> inet4;
+family_v({_,_,_,_,_,_,_,_}) -> inet6.
 
 make_gtp_socket(IP, Port, #{netns := NetNs} = Opts)
   when is_list(NetNs) ->
@@ -657,15 +660,15 @@ redirector_echo_response(ArrivalTS,
                                 redirector_nodes = [_|_] = Nodes,
                                 redirector_responses = Responses} = State)
   when Socket /= nil ->
-    NormalizeFamily = fun(inet) -> inet4; (inet6) -> inet6; (Family) -> Family end,
     Match = lists:any(fun({F, IP0, Port0, V0}) -> 
                               IP0 == IP andalso Port0 == Port andalso
-                              F == NormalizeFamily(family(IP)) andalso V0 == Version;
+                              F == family_v(IP) andalso V0 == Version;
                          (_) -> false
                       end, Nodes),
     if Match == true ->
         lager:info("~p: ~p got echo_response from ~p:~p", [ArrivalTS, Name, IP, Port]),
-        State#state{redirector_responses = Responses#{{NormalizeFamily(family(IP)), IP, Port, Version} => ArrivalTS}};
+        NewResponses = Responses#{{family_v(IP), IP, Port, Version} => ArrivalTS},
+        State#state{redirector_responses = NewResponses};
        true -> State
     end;
 redirector_echo_response(_ArrivalTS, _SendReq, State) ->
