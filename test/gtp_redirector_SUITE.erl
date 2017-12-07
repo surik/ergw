@@ -73,17 +73,27 @@ all() ->
      invalid_gtp_pdu,
      invalid_gtp_msg,
      simple_pdp_context_request,
+     create_pdp_context_request_resend,
      keep_alive
     ].
 
 %%%===================================================================
 %%% Tests
 %%%===================================================================
+init_per_testcase(create_pdp_context_request_resend, Config) ->
+    ct:pal("Sockets: ~p", [gtp_socket_reg:all()]),
+    ok = meck:new(ergw_cache, [passthrough, no_link]),
+    meck_reset(Config),
+    Config;
 
 init_per_testcase(_, Config) ->
     ct:pal("Sockets: ~p", [gtp_socket_reg:all()]),
     meck_reset(Config),
     Config.
+
+end_per_testcase(create_pdp_context_request_resend, Config) ->
+    meck:unload(ergw_cache),
+    Config;
 
 end_per_testcase(_, Config) ->
     Config.
@@ -110,8 +120,25 @@ simple_pdp_context_request(Config) ->
     ggsn_SUITE:simple_pdp_context_request(Config).
 
 %%--------------------------------------------------------------------
+create_pdp_context_request_resend() ->
+    [{doc, "Check that a retransmission cache of some request works"}].
+create_pdp_context_request_resend(Config) ->
+    % We are going to check how much times ergw_cache:enter will be called to storing 
+    % a node for the particular create_pdp_context_request in redirector mode.
+    % `ggsn_SUITE:create_pdp_context_request_resend` sends `create_pdp_context_request` twice
+    % but because rederector socket has some retransmission cache we expect that `enter`
+    % will be called just one, and the seconds request will be processed to node 
+    % which was cached before
+    Id = {'_', '_', '_', create_pdp_context_request, '_'},
+    Node = {'_', '_', '_', '_'},
+    Count0 = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
+    ggsn_SUITE:create_pdp_context_request_resend(Config),
+    Count = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
+    ?match(1, Count - Count0).
+
+%%--------------------------------------------------------------------
 keep_alive() ->
-    [{doc, "All backendd GTP-C should answer on echo_request which sent by timeout"}].
+    [{doc, "All backend GTP-C should answer on echo_request which sent by timeout"}].
 keep_alive(_Config) ->
     Id = [path, irx, {127,0,0,1}, tx, v1, echo_response],
     Cnt0 = get_value(exometer:get_value(Id)),

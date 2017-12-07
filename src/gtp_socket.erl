@@ -46,11 +46,18 @@
 	  responses,
 
 	  redirector_socket     = nil   :: nil | gen_socket:socket(),
+	  % lists of all nodes, including bad
 	  redirector_nodes      = []    :: list(),
+	  % here we have nodes which are not answered for Keep-Alive echo request
+	  % no requests should be transfered to such nodes
 	  redirector_bad_nodes  = []    :: list(),
 	  redirector_lb_type    = round_robin :: random | round_robin,
-	  redirector_ka_timeout = 60000 :: non_neg_integer(), % keep-alive timeout
+	  redirector_ka_timeout = 60000 :: non_neg_integer(), % Keep-Alive timeout
 	  redirector_ka_timer   = nil   :: reference(),
+	  % cached nodes for requests, because retransmission should happen for the same node
+	  redirector_requests,        % :: ergw_cache(),
+	  redirector_rt_timeout = 10000 :: non_neg_integer(), % retransmission timeout
+	  % timestamps for responses which used by Keep-Alive mechanism
 	  redirector_responses  = maps:new() :: map(),
 
 	  restart_counter}).
@@ -190,6 +197,9 @@ validate_redirector_option({redirector_lb_type, Type})
 validate_redirector_option({redirector_ka_timeout, Timeout})
   when is_integer(Timeout), Timeout > 0 ->
     ok;
+validate_redirector_option({redirector_rt_timeout, Timeout})
+  when is_integer(Timeout), Timeout > 0 ->
+    ok;
 validate_redirector_option(Value) ->
     throw({error, {redirector_options, Value}}).
 
@@ -244,6 +254,7 @@ maybe_init_redirector(#state{ip = IP} = State, #{redirector := [_|_] = Redirecto
     ok = gen_socket:setsockopt(Socket, sol_ip, hdrincl, true),
     ok = gen_socket:bind(Socket, {family_v(IP), IP, 0}),
     KATimeout = proplists:get_value(redirector_ka_timeout, Redirector, 60000),
+    RTTimeout = proplists:get_value(redirector_rt_timeout, Redirector, 10000),
     Nodes = proplists:get_value(redirector_nodes, Redirector, []),
     TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
     % let's assume that on start all backends are available 
@@ -254,6 +265,8 @@ maybe_init_redirector(#state{ip = IP} = State, #{redirector := [_|_] = Redirecto
                 redirector_lb_type = proplists:get_value(redirector_lb_type, Redirector, round_robin),
                 redirector_ka_timeout = KATimeout,
                 redirector_ka_timer = TRef,
+                redirector_requests = ergw_cache:new(?T3 * 4, redirector_requests), 
+                redirector_rt_timeout = RTTimeout,
                 redirector_responses = Responses};
 maybe_init_redirector(State, _) -> State.
 
@@ -359,6 +372,10 @@ handle_info({timeout, _TRef, requests}, #state{requests = Requests} = State) ->
 
 handle_info({timeout, _TRef, responses}, #state{responses = Responses} = State) ->
     {noreply, State#state{responses = ergw_cache:expire(Responses)}};
+
+handle_info({timeout, _TRef, redirector_requests}, 
+            #state{redirector_requests = Requests} = State) ->
+    {noreply, State#state{redirector_requests = ergw_cache:expire(Requests)}};
 
 handle_info({Socket, input_ready}, #state{socket = Socket} = State) ->
     handle_input(Socket, State);
@@ -598,25 +615,39 @@ apply_redirector_lb_type_1(Nodes, BadNodes, random) ->
     Index = rand:uniform(length(Nodes) - length(BadNodes)),
     {lists:nth(Index, Nodes -- BadNodes), Nodes}.
 
-handle_message_1(_ArrivalTS, IP, Port, #gtp{type = Type} = Msg, Packet0, 
+handle_message_1(_ArrivalTS, IP, Port, 
+                 #gtp{type = Type, seq_no = SeqId} = Msg, Packet0, 
                  #state{gtp_port = GtpPort,
                         redirector_socket = Socket,
                         redirector_nodes = [_|_] = Nodes,
                         redirector_bad_nodes = BadNodes,
+                        redirector_rt_timeout = RTTimeout,
+                        redirector_requests = Requests,
                         redirector_lb_type = LBType} = State)
   when Socket /= nil, Type /= echo_response, Type /= echo_request ->
-    case apply_redirector_lb_type(Nodes, BadNodes, LBType) of
-        {error, no_nodes} -> 
+    ReqKey = {GtpPort, IP, Port, Type, SeqId},
+    Result = case ergw_cache:get(ReqKey, Requests) of
+                 {value, CachedNode} -> 
+                     lager:debug("~p was cached for using backend: ~p", [ReqKey, CachedNode]),
+                     {true, {CachedNode, Nodes}};
+                 _Other -> {false, apply_redirector_lb_type(Nodes, BadNodes, LBType)}
+             end,
+    case Result of
+        {_, {error, no_nodes}} -> 
             lager:warning("~p: no nodes to redirect request", [GtpPort#gtp_port.name]),
             State;
-        {{Family, DIP, DPort, _}, NewNodes} ->
+        {Cached, {{Family, DIP, DPort, _} = Node, NewNodes}} ->
+            % if a backend was taken from cache we should not update it in cache this time
+            NewRequests = if Cached == true -> Requests;
+                             true -> ergw_cache:enter(ReqKey, Node, RTTimeout, Requests)
+                          end,
             Packet = case Family of
                          inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
                          inet6 -> throw("inet6 is not supported now")
                      end,
             gen_socket:sendto(Socket, {Family, DIP, DPort}, Packet),
             message_counter(rr, GtpPort, IP, Msg),
-            State#state{redirector_nodes = NewNodes}
+            State#state{redirector_nodes = NewNodes, redirector_requests = NewRequests}
     end;
 
 handle_message_1(ArrivalTS, IP, Port, #gtp{type = echo_request} = Msg, _Data, State) ->
