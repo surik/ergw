@@ -585,7 +585,7 @@ create_ipv4_udp_packet({SA1, SA2, SA3, SA4}, SPort, {DA1, DA2, DA3, DA4}, DPort,
 
 apply_redirector_lb_type(Nodes, BadNodes, LBType) ->
     case Nodes -- BadNodes of
-        [] -> {error, no_route};
+        [] -> {error, no_nodes};
         _ -> apply_redirector_lb_type_1(Nodes, BadNodes, LBType)
     end.
 
@@ -605,15 +605,19 @@ handle_message_1(_ArrivalTS, IP, Port, #gtp{type = Type} = Msg, Packet0,
                         redirector_bad_nodes = BadNodes,
                         redirector_lb_type = LBType} = State)
   when Socket /= nil, Type /= echo_response, Type /= echo_request ->
-    % TODO this may crash
-    {{Family, DIP, DPort, _}, NewNodes} = apply_redirector_lb_type(Nodes, BadNodes, LBType),
-    Packet = case Family of
-                 inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
-                 inet6 -> throw("inet6 is not supported now")
-             end,
-    gen_socket:sendto(Socket, {Family, DIP, DPort}, Packet),
-	message_counter(rr, GtpPort, IP, Msg),
-    State#state{redirector_nodes = NewNodes};
+    case apply_redirector_lb_type(Nodes, BadNodes, LBType) of
+        {error, no_nodes} -> 
+            lager:warning("~p: no nodes to redirect request", [GtpPort#gtp_port.name]),
+            State;
+        {{Family, DIP, DPort, _}, NewNodes} ->
+            Packet = case Family of
+                         inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
+                         inet6 -> throw("inet6 is not supported now")
+                     end,
+            gen_socket:sendto(Socket, {Family, DIP, DPort}, Packet),
+            message_counter(rr, GtpPort, IP, Msg),
+            State#state{redirector_nodes = NewNodes}
+    end;
 
 handle_message_1(ArrivalTS, IP, Port, #gtp{type = echo_request} = Msg, _Data, State) ->
     ReqKey = make_request(ArrivalTS, IP, Port, Msg, State),
