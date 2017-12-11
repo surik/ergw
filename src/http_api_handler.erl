@@ -12,6 +12,8 @@
          allowed_methods/2,
          content_types_accepted/2]).
 
+-include("include/ergw.hrl").
+
 -define(FIELDS_MAPPING, [{accept_new, 'acceptNewRequests'},
 			 {plmn_id, 'plmnId'}]).
 
@@ -19,7 +21,7 @@ init(Req, Opts) ->
     {cowboy_rest, Req, Opts}.
 
 allowed_methods(Req, State) ->
-    {[<<"GET">>, <<"POST">>], Req, State}.
+    {[<<"GET">>, <<"POST">>, <<"PUT">>], Req, State}.
 
 content_types_provided(Req, State) ->
     {[{<<"application/json">>, handle_request_json},
@@ -64,6 +66,46 @@ handle_request(<<"GET">>, <<"/api/v1/status/accept-new">>, json, Req, State) ->
     Response = jsx:encode(#{acceptNewRequests => AcceptNew}),
     {Response, Req, State};
 
+handle_request(<<"GET">>, <<"/api/v1/redirector">>, json, Req, State) ->
+    Sockets = [begin
+                   Socket = gtp_socket:get_info(Pid),
+                   normalize_socket_info(Socket)
+               end || {_, Pid, GtpPort} <- gtp_socket_reg:all(), 
+                      GtpPort#gtp_port.type == 'gtp-c'],
+    Result = jsx:encode(Sockets),
+    {Result, Req, State};
+
+handle_request(<<"GET">>, <<"/api/v1/redirector/", Name0/binary>>, json, Req, State) ->
+    Sockets = [gtp_socket:get_info(Pid) || 
+                 {Name, Pid, GtpPort} <- gtp_socket_reg:all(), 
+                 binary_to_existing_atom(Name0, latin1) == Name,
+                 GtpPort#gtp_port.type == 'gtp-c'],
+    case Sockets of
+        [Socket0] ->
+            Socket = normalize_socket_info(Socket0),
+            {jsx:encode(Socket), Req, State};
+        _ ->
+            NewReq = cowboy_req:reply(404, Req),
+            {"", NewReq, State}
+    end;
+
+handle_request(<<"PUT">>, <<"/api/v1/redirector/", Name/binary>>, json, Req, State) ->
+    case gtp_socket_reg:lookup(binary_to_existing_atom(Name, latin1)) of
+        #gtp_port{pid = Pid} ->
+            {ok, Body, NewReq} = cowboy_req:read_body(Req),
+            case decode_redirector_nodes(Body) of
+                {ok, Nodes} ->
+                    gtp_socket:set_redirector_nodes(Pid, Nodes),
+                    {true, NewReq, State};
+                {error, _} ->
+                    NewReq1 = cowboy_req:reply(400, NewReq),
+                    {false, NewReq1, State}
+            end;
+        undefined ->
+            NewReq = cowboy_req:reply(404, Req),
+            {false, NewReq, State}
+    end;
+
 handle_request(<<"GET">>, <<"/metrics">>, Format, Req, State) ->
     Metrics = metrics([], Format),
     {Metrics, Req, State};
@@ -99,6 +141,36 @@ handle_request(_, _, Req, _, State) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+normalize_socket_info(#{redirector_nodes := Nodes0} = Socket) ->
+    Nodes = lists:map(fun(Node) -> 
+        maps:map(fun(_K, V) when is_tuple(V) -> ioize(V);
+                    (_K, V) -> V 
+                 end, Node)
+    end, Nodes0), 
+    Socket#{redirector_nodes => Nodes};
+normalize_socket_info(Socket) -> Socket.
+
+decode_redirector_nodes(Body) ->
+    decode_redirector_nodes(jsx:is_json(Body), Body).
+
+decode_redirector_nodes(true, Body) ->
+    Nodes = lists:map(fun decode_node/1, jsx:decode(Body, [return_maps])),
+    case lists:member(error, Nodes) of
+        false -> {ok, Nodes};
+        true -> {error, bad_nodes}
+    end;
+decode_redirector_nodes(_IsJson, _Body) -> {error, bad_nodes}.
+
+decode_node(#{<<"ip">> := IP0, <<"port">> := Port, <<"version">> := V})
+  when is_binary(IP0) andalso is_integer(Port) 
+       andalso (V == <<"v1">> orelse V == <<"v2">>) -> 
+    case inet:parse_address(binary_to_list(IP0)) of
+        {ok, IP} ->
+            {gtp_socket:family_v(IP), IP, Port, binary_to_existing_atom(V, latin1)};
+        _ -> error
+    end;
+decode_node(_) -> error.
 
 path_to_metric(Path) ->
     lists:map(fun p2m/1, Path).

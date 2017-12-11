@@ -17,7 +17,8 @@
 	 send/4, send_response/3,
 	 send_request/6, send_request/7, resend_request/2,
 	 get_restart_counter/1]).
--export([get_request_q/1, get_response_q/1, get_seq_no/2]).
+-export([get_request_q/1, get_response_q/1, get_seq_no/2, get_info/1, 
+	 family_v/1, set_redirector_nodes/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -141,6 +142,12 @@ get_response_q(GtpPort) ->
 
 get_seq_no(GtpPort, ReqId) ->
     call(GtpPort, {get_seq_no, ReqId}).
+
+get_info(Pid) ->
+    gen_server:call(Pid, get_info).
+
+set_redirector_nodes(Pid, Nodes) ->
+    gen_server:call(Pid, {set_redirector_nodes, Nodes}).
 
 %%%===================================================================
 %%% Options Validation
@@ -286,6 +293,19 @@ handle_call({get_seq_no, ReqId}, _From, State) ->
 	_ ->
 	    {reply, {error, not_found}, State}
     end;
+
+handle_call(get_info, _From, #state{gtp_port = #gtp_port{name = Name},
+                                    redirector_nodes = Nodes} = State) ->
+    Result = #{name => Name, 
+               redirector_nodes => [#{ip => IP,
+                                      port => Port, 
+                                      version => Version}
+                                    || {_Family, IP, Port, Version} <- Nodes]},
+    {reply, Result, State};
+
+handle_call({set_redirector_nodes, Nodes}, _From, #state{redirector_bad_nodes = BadNodes0} = State) ->
+    BadNodes = BadNodes0 -- Nodes,
+    {reply, ok, State#state{redirector_nodes = Nodes, redirector_bad_nodes = BadNodes}};
 
 handle_call(Request, _From, State) ->
     lager:error("handle_call: unknown ~p", [lager:pr(Request, ?MODULE)]),
@@ -466,7 +486,7 @@ make_request(ArrivalTS, IP, Port,
 family({_,_,_,_}) -> inet;
 family({_,_,_,_,_,_,_,_}) -> inet6.
 
-% this returs family with the version number in the end
+% this returns family with the version number in the end
 family_v({_,_,_,_}) -> inet4;
 family_v({_,_,_,_,_,_,_,_}) -> inet6.
 

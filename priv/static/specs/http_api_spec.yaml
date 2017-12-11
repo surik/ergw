@@ -52,6 +52,54 @@ paths:
       responses:
         '200':
           description: returns the metrics
+  /redirector:
+    get:
+      summary: get list of the GTP Redirector sockets
+      responses:
+        '200':
+          description: returns the list of all configured GTP Redirector sockets
+          schema:
+            type: "array"
+            items:
+              $ref: '#/definitions/RedirectorNode'
+  /redirector/{name}:
+    get:
+      summary: get info about given GTP Redirector socket
+      parameters:
+        - name: name
+          in: path
+          required: true
+          type: string
+          description: 'the name of socket'
+      responses:
+        '200':
+          description: returns all info about the given GTP Redirector socket
+          schema:
+            $ref: '#/definitions/RedirectorNode'
+        '404':
+          description: there is not GTP Redirector socket with given name
+    put:
+      summary: update the given GTP Redirector socket
+      parameters:
+        - name: name
+          in: path
+          required: true
+          type: string
+          description: 'the name of socket'
+        - name: nodes
+          in: body
+          required: true
+          schema:
+            type: "array"
+            items:
+              $ref: '#/definitions/RedirectorNode'
+      responses:
+        '202':
+          description: successful updated
+        '404':
+          description: there is not GTP Redirector socket with given name
+        '400':
+          description: wrong nodes list in the request
 definitions:
   Status:
     type: "object"
@@ -79,3 +127,15 @@ definitions:
     properties:
       version:
         type: "string"
+  RedirectorNode:
+    type: "object"
+    properties:
+      ip:
+        type: "string"
+      port:
+        type: "integer"
+      version:
+        type: "string"
+        enum: 
+          - v1
+          - v2

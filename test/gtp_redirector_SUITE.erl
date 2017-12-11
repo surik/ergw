@@ -25,7 +25,8 @@ suite() ->
     [{timetrap,{seconds,30}}].
 
 init_per_suite(Config0) ->
-    AppCfg = inject_redirector(ggsn_SUITE:get_test_config()),
+    inets:start(),
+    AppCfg = inject_redirector_and_http_api(ggsn_SUITE:get_test_config()),
     Config = [{handler_under_test, ?HUT},
               {app_cfg, AppCfg}
               | Config0],
@@ -35,7 +36,7 @@ init_per_suite(Config0) ->
     timer:sleep(1100),
     Config1.
 
-inject_redirector(Config) ->
+inject_redirector_and_http_api(Config) ->
     ModifyIRX = 
         fun({irx, _}) -> 
                 IRX = [{type, 'gtp-c'},
@@ -60,11 +61,12 @@ inject_redirector(Config) ->
            (Other) -> Other
         end,
     lists:map(fun({ergw, Ergw}) -> 
-                      {ergw, lists:map(ModifySockets, Ergw)};
+                      {ergw, lists:map(ModifySockets, Ergw ++ [{http_api, [{port, 0}]}])};
                  (Other) -> Other
              end, Config).
 
 end_per_suite(Config) ->
+    inets:stop(),
     ok = lib_end_per_suite(Config),
     ok.
 
@@ -74,7 +76,13 @@ all() ->
      invalid_gtp_msg,
      simple_pdp_context_request,
      create_pdp_context_request_resend,
-     keep_alive
+     keep_alive,
+     api_get_all_redirectors,
+     api_get_one_redirectors,
+     api_get_one_redirectors_not_found,
+     api_put_nodes,
+     api_put_nodes_not_found,
+     api_put_bad_nodes
     ].
 
 %%%===================================================================
@@ -134,7 +142,7 @@ create_pdp_context_request_resend(Config) ->
     Count0 = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
     ggsn_SUITE:create_pdp_context_request_resend(Config),
     Count = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
-    ?match(1, Count - Count0).
+    ?equal(1, Count - Count0).
 
 %%--------------------------------------------------------------------
 keep_alive() ->
@@ -144,12 +152,117 @@ keep_alive(_Config) ->
     Cnt0 = get_value(exometer:get_value(Id)),
     timer:sleep(1000),
     Cnt = get_value(exometer:get_value(Id)),
-    ?match(true, Cnt > Cnt0),
+    ?equal(true, Cnt > Cnt0),
     ok.
 
 get_value({ok, DPs}) -> proplists:get_value(value, DPs, -1);
 get_value(_) -> -1.
 
+
+%%--------------------------------------------------------------------
+api_get_all_redirectors() ->
+    [{doc, ""}].
+api_get_all_redirectors(_Config) ->
+    URL = get_test_url("/api/v1/redirector"),
+    {ok, {_, _, Body}} = httpc:request(get, {URL, []}, [], [{body_format, binary}]),
+    Res = jsx:decode(Body, [return_maps]),
+    ?equal(2, length(Res)),
+    ?match([#{<<"name">> := <<"irx">>, <<"redirector_nodes">> := []}, 
+            #{<<"name">> := <<"rrx">>,
+              <<"redirector_nodes">> := [#{%<<"ip">>      := <<"127.0.1.1">>, 
+                                           <<"port">>    := 2123,
+                                           <<"version">> := <<"v1">>},
+                                         #{%<<"ip">>      := <<"10.0.0.1">>,
+                                           <<"port">>    := 2123,
+                                           <<"version">> := <<"v1">>}]}], 
+           Res),
+    ok.
+
+%%--------------------------------------------------------------------
+api_get_one_redirectors() ->
+    [{doc, ""}].
+api_get_one_redirectors(_Config) ->
+    URL = get_test_url("/api/v1/redirector/rrx"),
+    {ok, {{_, Status, _}, _, Body}} = httpc:request(get, {URL, []}, [], [{body_format, binary}]),
+    Res0 = jsx:decode(Body, [return_maps]),
+    Nodes = lists:sort(fun(#{<<"ip">> := IP1}, #{<<"ip">> := IP2}) ->
+                            IP1 < IP2
+                       end, maps:get(<<"redirector_nodes">>, Res0)),
+    ?equal(200, Status),
+    ?match([#{<<"ip">>      := <<"10.0.0.1">>, 
+              <<"port">>    := 2123,
+              <<"version">> := <<"v1">>},
+            #{<<"ip">>      := <<"127.0.1.1">>,
+              <<"port">>    := 2123,
+              <<"version">> := <<"v1">>}],
+           Nodes),
+    ok.
+
+%%--------------------------------------------------------------------
+api_get_one_redirectors_not_found() ->
+    [{doc, ""}].
+api_get_one_redirectors_not_found(_Config) ->
+    URL = get_test_url("/api/v1/redirector/unknown"),
+    {ok, {{_, Status, _}, _, Body}} = httpc:request(get, {URL, []}, [], [{body_format, binary}]),
+    ?equal(404, Status),
+    ?equal(<<>>,Body),
+    ok.
+
+%%--------------------------------------------------------------------
+api_put_nodes() ->
+    [{doc, ""}].
+api_put_nodes(_Config) ->
+    URL = get_test_url("/api/v1/redirector/rrx"),
+    Nodes = jsx:encode([#{ip => <<"127.0.0.1">>, port => 12234, version => v2}]),
+    {ok, {{_, Status, _}, _, Body}} = httpc:request(put, {URL, [], "application/json", Nodes}, [], [{body_format, binary}]),
+    ?equal(204, Status),
+    ?equal(<<>>, Body),
+    ok.
+
+%%--------------------------------------------------------------------
+api_put_nodes_not_found() ->
+    [{doc, ""}].
+api_put_nodes_not_found(_Config) ->
+    URL = get_test_url("/api/v1/redirector/undefined"),
+    {ok, {{_, Status, _}, _, Body}} = httpc:request(put, {URL, [], "application/json", ""}, [], [{body_format, binary}]),
+    ?equal(404, Status),
+    ?equal(<<>>, Body),
+    ok.
+
+%%--------------------------------------------------------------------
+api_put_bad_nodes() ->
+    [{doc, ""}].
+api_put_bad_nodes(_Config) ->
+    URL = get_test_url("/api/v1/redirector/rrx"),
+    % empty
+    {ok, {{_, Status, _}, _, Body}} = httpc:request(put, {URL, [], "application/json", ""}, [], [{body_format, binary}]),
+    ?equal(400, Status),
+    ?equal(<<>>, Body),
+    % wrong data
+    Nodes1 = jsx:encode([#{wrong => "data"}]),
+    {ok, {{_, Status1, _}, _, Body1}} = httpc:request(put, {URL, [], "application/json", Nodes1}, [], [{body_format, binary}]),
+    ?equal(400, Status1),
+    ?equal(<<>>, Body1),
+    % wrong ip
+    Nodes2 = jsx:encode([#{ip => <<"127.0.0.1.1.1.">>, port => 12234, version => v2}]),
+    {ok, {{_, Status2, _}, _, Body2}} = httpc:request(put, {URL, [], "application/json", Nodes2}, [], [{body_format, binary}]),
+    ?equal(400, Status2),
+    ?equal(<<>>, Body2),
+    % wrong ip
+    Nodes3 = jsx:encode([#{ip => <<"127.0.0.1">>, port => abc, version => v2}]),
+    {ok, {{_, Status3, _}, _, Body3}} = httpc:request(put, {URL, [], "application/json", Nodes3}, [], [{body_format, binary}]),
+    ?equal(400, Status3),
+    ?equal(<<>>, Body3),
+    % wrong version
+    Nodes4 = jsx:encode([#{ip => <<"127.0.0.1">>, port => 12234, version => v5}]),
+    {ok, {{_, Status4, _}, _, Body4}} = httpc:request(put, {URL, [], "application/json", Nodes4}, [], [{body_format, binary}]),
+    ?equal(400, Status4),
+    ?equal(<<>>, Body4),
+    ok.
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+get_test_url(Path) ->
+    Port = ranch:get_port(ergw_http_listener),
+    lists:flatten(io_lib:format("http://localhost:~w~s", [Port, Path])).
