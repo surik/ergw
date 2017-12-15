@@ -50,10 +50,10 @@ inject_redirector_and_http_api(Config) ->
                  {reuseaddr, true},
                  {redirector, [
                                {redirector_ka_timeout, 500},
-                               {redirector_nodes, [{inet4, ?TEST_GSN_R, ?GTP1c_PORT, v1},
+                               {redirector_nodes, [{v1, ?TEST_GSN_R},
                                                    % this one should be not available 
                                                    % and be ignored by keep-alive mechanism
-                                                   {inet4, {10,0,0,1}, ?GTP1c_PORT, v1} 
+                                                   {v1, {10,0,0,1}}
                                                   ]}
                               ]} ]},
     ModifySockets = 
@@ -138,7 +138,7 @@ create_pdp_context_request_resend(Config) ->
     % will be called just one, and the seconds request will be processed to node 
     % which was cached before
     Id = {'_', '_', '_', create_pdp_context_request, '_'},
-    Node = {'_', '_', '_', '_'},
+    Node = {'_', '_'},
     Count0 = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
     ggsn_SUITE:create_pdp_context_request_resend(Config),
     Count = meck:num_calls(ergw_cache, enter, [Id, Node, '_', '_']),
@@ -169,11 +169,9 @@ api_get_all_redirectors(_Config) ->
     ?equal(2, length(Res)),
     ?match([#{<<"name">> := <<"irx">>, <<"redirector_nodes">> := []}, 
             #{<<"name">> := <<"rrx">>,
-              <<"redirector_nodes">> := [#{%<<"ip">>      := <<"127.0.1.1">>, 
-                                           <<"port">>    := 2123,
+              <<"redirector_nodes">> := [#{<<"ip">>      := _, 
                                            <<"version">> := <<"v1">>},
-                                         #{%<<"ip">>      := <<"10.0.0.1">>,
-                                           <<"port">>    := 2123,
+                                         #{<<"ip">>      := _, 
                                            <<"version">> := <<"v1">>}]}], 
            Res),
     ok.
@@ -190,10 +188,8 @@ api_get_one_redirectors(_Config) ->
                        end, maps:get(<<"redirector_nodes">>, Res0)),
     ?equal(200, Status),
     ?match([#{<<"ip">>      := <<"10.0.0.1">>, 
-              <<"port">>    := 2123,
               <<"version">> := <<"v1">>},
             #{<<"ip">>      := <<"127.0.1.1">>,
-              <<"port">>    := 2123,
               <<"version">> := <<"v1">>}],
            Nodes),
     ok.
@@ -213,10 +209,17 @@ api_put_nodes() ->
     [{doc, ""}].
 api_put_nodes(_Config) ->
     URL = get_test_url("/api/v1/redirector/rrx"),
-    Nodes = jsx:encode([#{ip => <<"127.0.0.1">>, port => 12234, version => v2}]),
+    Nodes = jsx:encode([#{ip => <<"127.0.0.1">>, version => v2}]),
     {ok, {{_, Status, _}, _, Body}} = httpc:request(put, {URL, [], "application/json", Nodes}, [], [{body_format, binary}]),
     ?equal(204, Status),
     ?equal(<<>>, Body),
+    {ok, {{_, Status1, _}, _, Body1}} = httpc:request(get, {URL, []}, [], [{body_format, binary}]),
+    ?equal(200, Status1),
+    ?match(#{<<"name">> := <<"rrx">>,
+             <<"redirector_nodes">> :=
+                [#{<<"ip">> := <<"127.0.0.1">>,
+                   <<"version">> := <<"v2">>}]
+            }, jsx:decode(Body1, [return_maps])),
     ok.
 
 %%--------------------------------------------------------------------
@@ -244,17 +247,12 @@ api_put_bad_nodes(_Config) ->
     ?equal(400, Status1),
     ?equal(<<>>, Body1),
     % wrong ip
-    Nodes2 = jsx:encode([#{ip => <<"127.0.0.1.1.1.">>, port => 12234, version => v2}]),
+    Nodes2 = jsx:encode([#{ip => <<"127.0.0.1.1.1.">>, version => v2}]),
     {ok, {{_, Status2, _}, _, Body2}} = httpc:request(put, {URL, [], "application/json", Nodes2}, [], [{body_format, binary}]),
     ?equal(400, Status2),
     ?equal(<<>>, Body2),
-    % wrong ip
-    Nodes3 = jsx:encode([#{ip => <<"127.0.0.1">>, port => abc, version => v2}]),
-    {ok, {{_, Status3, _}, _, Body3}} = httpc:request(put, {URL, [], "application/json", Nodes3}, [], [{body_format, binary}]),
-    ?equal(400, Status3),
-    ?equal(<<>>, Body3),
     % wrong version
-    Nodes4 = jsx:encode([#{ip => <<"127.0.0.1">>, port => 12234, version => v5}]),
+    Nodes4 = jsx:encode([#{ip => <<"127.0.0.1">>, version => v5}]),
     {ok, {{_, Status4, _}, _, Body4}} = httpc:request(put, {URL, [], "application/json", Nodes4}, [], [{body_format, binary}]),
     ?equal(400, Status4),
     ?equal(<<>>, Body4),

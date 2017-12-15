@@ -132,8 +132,6 @@ definitions:
     properties:
       ip:
         type: "string"
-      port:
-        type: "integer"
       version:
         type: "string"
         enum: 

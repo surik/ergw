@@ -191,10 +191,9 @@ validate_option(Opt, Value) ->
     throw({error, {options, {Opt, Value}}}).
 
 validate_redirector_option({redirector_nodes, Nodes}) when is_list(Nodes) ->
-    lists:map(fun({Family, IP, Port, Version} = Value) when 
-                      (Family == inet4 orelse Family == inet6),
-                      is_tuple(IP), is_integer(Port), Port > 0,
-                      (Version == v1 orelse Version == v2) -> Value;
+    lists:map(fun({Version, IP} = Value) when 
+                     is_tuple(IP), 
+                     (Version == v1 orelse Version == v2) -> Value;
                  (Value) -> throw({error, {redirector_nodes, Value}})
               end, Nodes),
     ok;
@@ -298,9 +297,8 @@ handle_call(get_info, _From, #state{gtp_port = #gtp_port{name = Name},
                                     redirector_nodes = Nodes} = State) ->
     Result = #{name => Name, 
                redirector_nodes => [#{ip => IP,
-                                      port => Port, 
                                       version => Version}
-                                    || {_Family, IP, Port, Version} <- Nodes]},
+                                    || {Version, IP} <- Nodes]},
     {reply, Result, State};
 
 handle_call({set_redirector_nodes, Nodes}, _From, #state{redirector_bad_nodes = BadNodes0} = State) ->
@@ -376,12 +374,12 @@ handle_info({timeout, _TRef, redirector_keep_alive},
                               (_K, _V) -> true
                            end, Responses),
     BadNodes = lists:filter(fun(Node) -> maps:get(Node, NotAnswered, false) end, Nodes),
-    lists:foreach(fun({_, IP, Port, Version}) ->
+    lists:foreach(fun({Version, IP}) ->
                       Msg = case Version of
                                 v1 -> gtp_v1_c:build_echo_request(GtpPort);
                                 v2 -> gtp_v2_c:build_echo_request(GtpPort)
                             end,
-                      send_request(GtpPort, IP, Port, ?T3 * 2, 0, Msg, [])
+                      send_request(GtpPort, IP, ?GTP1c_PORT, ?T3 * 2, 0, Msg, [])
                   end, Nodes),
     TRef = erlang:start_timer(KATimeout, self(), redirector_keep_alive),
     {noreply, State#state{redirector_ka_timer = TRef, 
@@ -648,24 +646,29 @@ handle_message_1(_ArrivalTS, IP, Port,
     ReqKey = {GtpPort, IP, Port, Type, SeqId},
     Result = case ergw_cache:get(ReqKey, Requests) of
                  {value, CachedNode} -> 
-                     lager:debug("~p was cached for using backend: ~p", [ReqKey, CachedNode]),
+                     lager:debug("~p: ~p was cached for using backend: ~p", 
+                                 [GtpPort#gtp_port.name, ReqKey, CachedNode]),
                      {true, {CachedNode, Nodes}};
                  _Other -> {false, apply_redirector_lb_type(Nodes, BadNodes, LBType)}
              end,
     case Result of
         {_, {error, no_nodes}} -> 
-            lager:warning("~p: no nodes to redirect request", [GtpPort#gtp_port.name]),
+            lager:warning("~p: no nodes to redirect request ~p", 
+                          [GtpPort#gtp_port.name, ReqKey]),
             State;
-        {Cached, {{Family, DIP, DPort, _} = Node, NewNodes}} ->
+        {Cached, {{_, DstIP} = Node, NewNodes}} ->
             % if a backend was taken from cache we should not update it in cache this time
             NewRequests = if Cached == true -> Requests;
                              true -> ergw_cache:enter(ReqKey, Node, RTTimeout, Requests)
                           end,
+            Family = gtp_socket:family_v(DstIP),
+            DstPort = ?GTP1c_PORT,
             Packet = case Family of
-                         inet4 -> create_ipv4_udp_packet(IP, Port, DIP, DPort, Packet0);
+                         inet4 -> create_ipv4_udp_packet(IP, Port, DstIP, DstPort, Packet0);
                          inet6 -> throw("inet6 is not supported now")
                      end,
-            gen_socket:sendto(Socket, {Family, DIP, DPort}, Packet),
+            gen_socket:sendto(Socket, {Family, DstIP, DstPort}, Packet),
+            lager:debug("~p: redirect to ~p", [GtpPort#gtp_port.name, DstIP]),
             message_counter(rr, GtpPort, IP, Msg),
             State#state{redirector_nodes = NewNodes, redirector_requests = NewRequests}
     end;
@@ -715,14 +718,12 @@ redirector_echo_response(ArrivalTS,
                                 redirector_nodes = [_|_] = Nodes,
                                 redirector_responses = Responses} = State)
   when Socket /= nil ->
-    Match = lists:any(fun({F, IP0, Port0, V0}) -> 
-                              IP0 == IP andalso Port0 == Port andalso
-                              F == family_v(IP) andalso V0 == Version;
+    Match = lists:any(fun({V0, IP0}) -> IP0 == IP andalso V0 == Version;
                          (_) -> false
                       end, Nodes),
     if Match == true ->
         lager:info("~p: ~p got echo_response from ~p:~p", [ArrivalTS, Name, IP, Port]),
-        NewResponses = Responses#{{family_v(IP), IP, Port, Version} => ArrivalTS},
+        NewResponses = Responses#{{Version, IP} => ArrivalTS},
         State#state{redirector_responses = NewResponses};
        true -> State
     end;

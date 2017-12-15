@@ -162,12 +162,11 @@ decode_redirector_nodes(true, Body) ->
     end;
 decode_redirector_nodes(_IsJson, _Body) -> {error, bad_nodes}.
 
-decode_node(#{<<"ip">> := IP0, <<"port">> := Port, <<"version">> := V})
-  when is_binary(IP0) andalso is_integer(Port) 
-       andalso (V == <<"v1">> orelse V == <<"v2">>) -> 
+decode_node(#{<<"ip">> := IP0, <<"version">> := V})
+  when is_binary(IP0) andalso (V == <<"v1">> orelse V == <<"v2">>) -> 
     case inet:parse_address(binary_to_list(IP0)) of
         {ok, IP} ->
-            {gtp_socket:family_v(IP), IP, Port, binary_to_existing_atom(V, latin1)};
+            {binary_to_existing_atom(V, latin1), IP};
         _ -> error
     end;
 decode_node(_) -> error.
