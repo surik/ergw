@@ -68,7 +68,7 @@ handle_request(<<"GET">>, <<"/api/v1/status/accept-new">>, json, Req, State) ->
 
 handle_request(<<"GET">>, <<"/api/v1/redirector">>, json, Req, State) ->
     Sockets = [begin
-                   Socket = gtp_socket:get_info(Pid),
+                   Socket = gtp_socket:get_redirector_nodes(Pid),
                    normalize_socket_info(Socket)
                end || {_, Pid, GtpPort} <- gtp_socket_reg:all(), 
                       GtpPort#gtp_port.type == 'gtp-c'],
@@ -76,7 +76,7 @@ handle_request(<<"GET">>, <<"/api/v1/redirector">>, json, Req, State) ->
     {Result, Req, State};
 
 handle_request(<<"GET">>, <<"/api/v1/redirector/", Name0/binary>>, json, Req, State) ->
-    Sockets = [gtp_socket:get_info(Pid) || 
+    Sockets = [gtp_socket:get_redirector_nodes(Pid) || 
                  {Name, Pid, GtpPort} <- gtp_socket_reg:all(), 
                  binary_to_existing_atom(Name0, latin1) == Name,
                  GtpPort#gtp_port.type == 'gtp-c'],
